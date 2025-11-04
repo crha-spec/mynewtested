@@ -1,4 +1,3 @@
-
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -81,6 +80,14 @@ function updateUserList(roomCode) {
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ✅ RENDER HEALTH CHECK - CRITICAL
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString()
+  });
+});
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -303,15 +310,15 @@ io.on('connection', (socket) => {
         uploadedAt: new Date()
       };
 
-      // Playback state'i sıfırla
+      // ✅ OTOMATİK BAŞLAT
       room.playbackState = {
-        playing: false,
+        playing: true,
         currentTime: 0,
         playbackRate: 1,
         videoId: videoId
       };
       
-      // Tüm kullanıcılara bildir - HEMEN OTOMATİK BAŞLAT
+      // ✅ HEMEN TÜM KULLANICILARA GÖNDER
       io.to(currentRoomCode).emit('youtube-video-shared', {
         videoId: videoId,
         title: title || 'YouTube Video',
@@ -687,7 +694,7 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SERVER ${PORT} PORTUNDA ÇALIŞIYOR`);
   console.log(`🎯 MONGODB OLMADAN - BELLEK TABANLI`);
   console.log(`📞 GELİŞTİRİLMİŞ WEBRTC DESTEĞİ`);
-  console.log(`🔧 OPTİMİZE BAĞLANTI AYARLARI`);
+  console.log(`🔧 OPTİMIZE BAĞLANTI AYARLARI`);
   console.log(`📸 TÜM ÖZELLİKLER AKTİF:`);
   console.log(`   ✅ Oda Oluşturma/Katılma`);
   console.log(`   ✅ Video Yükleme & YouTube`);
