@@ -604,6 +604,19 @@ io.on('connection', (socket) => {
     });
   });
 
+  // server.js başına ekleyin
+process.on('warning', (warning) => {
+    console.log('⚠️ System Warning:', warning.name, warning.message);
+});
+
+// Memory leak protection
+setInterval(() => {
+    if (process.memoryUsage().heapUsed > 500 * 1024 * 1024) {
+        console.log('🧹 Memory cleanup triggered');
+        global.gc && global.gc();
+    }
+}, 30000);
+
   // 🔌 BAĞLANTI KESİLDİĞİNDE
   socket.on('disconnect', (reason) => {
     console.log('🔌 Kullanıcı ayrıldı:', socket.id, 'Sebep:', reason);
