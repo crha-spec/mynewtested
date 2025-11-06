@@ -8,11 +8,36 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 10000;
 
+// ✅ BAĞLANTI İZLEME SİSTEMİ - YENİ EKLENDİ
+const connectionMonitor = new Map();
+
 // 🎯 MONGODB OLMADAN - BELLEK TABANLI SİSTEM
 const rooms = new Map();      // Tüm odalar
 const users = new Map();      // Tüm kullanıcılar
 const messages = new Map();   // Tüm mesajlar (oda bazlı)
 const pendingOffers = new Map(); // Bekleyen WebRTC offer'ları
+
+// ✅ BAĞLANTI SAĞLIK KONTROLÜ SİSTEMİ - YENİ EKLENDİ
+function startConnectionHealthCheck() {
+  setInterval(() => {
+    const now = Date.now();
+    
+    // Tüm aktif bağlantıları kontrol et
+    for (const [socketId, connection] of connectionMonitor.entries()) {
+      const timeSinceLastPing = now - connection.lastPing;
+      
+      // 45 saniyeden fazla ping gelmemişse bağlantıyı kapat
+      if (timeSinceLastPing > 45000) {
+        const socket = io.sockets.sockets.get(socketId);
+        if (socket) {
+          console.log(`🔌 Bağlantı timeout: ${socketId}`);
+          socket.disconnect(true);
+        }
+        connectionMonitor.delete(socketId);
+      }
+    }
+  }, 30000); // 30 saniyede bir kontrol
+}
 
 // Socket.io configuration - BÜYÜK DOSYA DESTEĞİ ve GELİŞTİRİLMİŞ BAĞLANTI
 const io = socketIo(server, {
@@ -81,17 +106,30 @@ app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ✅ RENDER HEALTH CHECK - CRITICAL
+// ✅ RENDER HEALTH CHECK - CRITICAL (GÜNCELLENDİ)
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'OK', 
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    connections: connectionMonitor.size,
+    rooms: rooms.size,
+    users: users.size
   });
 });
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
   console.log('✅ Yeni kullanıcı bağlandı:', socket.id);
+  
+  // ✅ BAĞLANTI İZLEMEYE EKLE - YENİ EKLENDİ
+  connectionMonitor.set(socket.id, {
+    userName: 'Anonymous',
+    roomCode: null,
+    lastPing: Date.now(),
+    connectedAt: Date.now()
+  });
 
   let currentUser = null;
   let currentRoomCode = null;
@@ -102,6 +140,13 @@ io.on('connection', (socket) => {
       socket.emit('connection-health', { status: 'healthy', timestamp: Date.now() });
     }
   }, 15000); // 15 saniyede bir
+
+  // ✅ PING-PONG SİSTEMİ - YENİ EKLENDİ
+  const pingInterval = setInterval(() => {
+    if (socket.connected) {
+      socket.emit('ping', { timestamp: Date.now() });
+    }
+  }, 10000); // 10 saniyede bir ping
 
   // 🎯 ODA OLUŞTURMA - BASİT ve GARANTİ
   socket.on('create-room', (data) => {
@@ -151,6 +196,13 @@ io.on('connection', (socket) => {
         isOwner: true,
         country: 'Türkiye'
       };
+      
+      // ✅ BAĞLANTI İZLEMEYİ GÜNCELLE - YENİ EKLENDİ
+      connectionMonitor.set(socket.id, {
+        ...connectionMonitor.get(socket.id),
+        userName: userName,
+        roomCode: roomCode
+      });
       
       // Belleğe kaydet
       room.users.set(socket.id, currentUser);
@@ -207,6 +259,13 @@ io.on('connection', (socket) => {
         isOwner: room.owner === socket.id,
         country: 'Türkiye'
       };
+      
+      // ✅ BAĞLANTI İZLEMEYİ GÜNCELLE - YENİ EKLENDİ
+      connectionMonitor.set(socket.id, {
+        ...connectionMonitor.get(socket.id),
+        userName: userName,
+        roomCode: roomCode
+      });
       
       // Belleğe kaydet
       room.users.set(socket.id, currentUser);
@@ -604,6 +663,20 @@ io.on('connection', (socket) => {
     });
   });
 
+  // ✅ PONG ALINDIĞINDA - YENİ EKLENDİ
+  socket.on('pong', (data) => {
+    const connection = connectionMonitor.get(socket.id);
+    if (connection) {
+      connection.lastPing = Date.now();
+      connectionMonitor.set(socket.id, connection);
+    }
+  });
+
+  // ✅ PING EVENT - YENİ EKLENDİ
+  socket.on('ping', (data) => {
+    socket.emit('pong', { timestamp: Date.now() });
+  });
+
   // server.js başına ekleyin
 process.on('warning', (warning) => {
     console.log('⚠️ System Warning:', warning.name, warning.message);
@@ -620,6 +693,10 @@ setInterval(() => {
   // 🔌 BAĞLANTI KESİLDİĞİNDE
   socket.on('disconnect', (reason) => {
     console.log('🔌 Kullanıcı ayrıldı:', socket.id, 'Sebep:', reason);
+    
+    // ✅ TEMİZLİK - YENİ EKLENDİ
+    clearInterval(pingInterval);
+    connectionMonitor.delete(socket.id);
     
     // Bağlantı kontrolünü temizle
     clearInterval(connectionCheck);
@@ -702,12 +779,16 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// ✅ BAĞLANTI İZLEME SİSTEMİNİ BAŞLAT - YENİ EKLENDİ
+startConnectionHealthCheck();
+
 // Start server
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SERVER ${PORT} PORTUNDA ÇALIŞIYOR`);
   console.log(`🎯 MONGODB OLMADAN - BELLEK TABANLI`);
   console.log(`📞 GELİŞTİRİLMİŞ WEBRTC DESTEĞİ`);
   console.log(`🔧 OPTİMIZE BAĞLANTI AYARLARI`);
+  console.log(`❤️  BAĞLANTI SORUNU ÇÖZÜLDÜ - 5DK TIMEOUT KALDIRILDI`);
   console.log(`📸 TÜM ÖZELLİKLER AKTİF:`);
   console.log(`   ✅ Oda Oluşturma/Katılma`);
   console.log(`   ✅ Video Yükleme & YouTube`);
