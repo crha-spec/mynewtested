@@ -38,6 +38,7 @@ const rooms = new Map();
 const users = new Map();
 const messages = new Map();
 const pendingOffers = new Map();
+const activeCalls = new Map(); // Yeni: Aktif çağrıları takip etmek için
 const connectionMonitor = new Map();
 
 // ✅ SOCKET.IO - RENDER İÇİN OPTİMİZE
@@ -81,7 +82,8 @@ function updateUserList(roomCode) {
     userPhoto: user.userPhoto,
     userColor: user.userColor,
     isOwner: user.isOwner,
-    country: user.country
+    country: user.country,
+    isInCall: activeCalls.has(user.id) // Çağrı durumu
   }));
   
   io.to(roomCode).emit('user-list-update', userList);
@@ -122,6 +124,7 @@ app.get('/health', (req, res) => {
     connections: connectionMonitor.size,
     rooms: rooms.size,
     users: users.size,
+    activeCalls: activeCalls.size,
     memory: Math.round(process.memoryUsage().heapUsed / 1024 / 1024) + 'MB'
   });
 });
@@ -431,11 +434,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 📞 WEBRTC ARAMALAR
+  // 📞 WEBRTC ARAMALAR - GÜNCELLENMİŞ VERSİYON
   socket.on('start-call', (data) => {
     try {
       const { targetUserName, offer, type, callerName } = data;
+      console.log(`📞 Arama başlatılıyor: ${callerName} -> ${targetUserName}, Tip: ${type}`);
       
+      // Hedef kullanıcıyı bul
       let targetSocketId = null;
       users.forEach((user, socketId) => {
         if (user.userName === targetUserName && user.roomCode === currentRoomCode) {
@@ -444,97 +449,183 @@ io.on('connection', (socket) => {
       });
       
       if (targetSocketId) {
-        pendingOffers.set(targetSocketId, { offer, callerName, type, timestamp: Date.now() });
-        io.to(targetSocketId).emit('incoming-call', { offer, callerName, type });
+        // Çağrıyı kaydet
+        const callData = {
+          callerSocketId: socket.id,
+          callerName: callerName,
+          targetSocketId: targetSocketId,
+          targetUserName: targetUserName,
+          type: type,
+          roomCode: currentRoomCode,
+          startTime: new Date(),
+          status: 'ringing'
+        };
+        
+        activeCalls.set(socket.id, callData);
+        activeCalls.set(targetSocketId, callData);
+        
+        // Hedefe bildirim gönder
+        io.to(targetSocketId).emit('incoming-call', { 
+          offer, 
+          callerName, 
+          type,
+          callerSocketId: socket.id 
+        });
+        
+        console.log(`📞 Arama bildirimi gönderildi: ${callerName} -> ${targetUserName}`);
       } else {
-        socket.emit('call-error', { message: 'Kullanıcı bulunamadı' });
+        socket.emit('call-error', { message: 'Kullanıcı bulunamadı veya çevrimdışı' });
       }
     } catch (error) {
-      console.error('❌ Call error:', error);
+      console.error('❌ Start call error:', error);
+      socket.emit('call-error', { message: 'Arama başlatılamadı' });
     }
   });
 
+  // ✅ ÇAĞRIYI KABUL ETME
+  socket.on('accept-call', (data) => {
+    try {
+      const { callerSocketId } = data;
+      const callData = activeCalls.get(socket.id);
+      
+      if (callData && callData.callerSocketId === callerSocketId) {
+        callData.status = 'accepted';
+        
+        // Aramayı kabul edenin cevabını arayana gönder
+        io.to(callerSocketId).emit('call-accepted', {
+          answererSocketId: socket.id,
+          answererName: currentUser?.userName
+        });
+        
+        console.log(`✅ Arama kabul edildi: ${callData.callerName} -> ${callData.targetUserName}`);
+      }
+    } catch (error) {
+      console.error('❌ Accept call error:', error);
+    }
+  });
+
+  // ✅ WEBRTC ANSWER
   socket.on('webrtc-answer', (data) => {
     try {
-      const { targetUserName, answer } = data;
+      const { targetSocketId, answer } = data;
+      console.log(`📞 WebRTC answer gönderiliyor: ${socket.id} -> ${targetSocketId}`);
       
-      let callerSocketId = null;
-      users.forEach((user, socketId) => {
-        if (user.userName === targetUserName && user.roomCode === currentRoomCode) {
-          callerSocketId = socketId;
-        }
-      });
-      
-      if (callerSocketId) {
-        io.to(callerSocketId).emit('webrtc-answer', {
+      if (targetSocketId) {
+        io.to(targetSocketId).emit('webrtc-answer', {
           answer,
+          answererSocketId: socket.id,
           answererName: currentUser?.userName
         });
       }
     } catch (error) {
-      console.error('❌ Answer error:', error);
+      console.error('❌ WebRTC answer error:', error);
     }
   });
 
+  // ✅ WEBRTC ICE CANDIDATE
   socket.on('webrtc-ice-candidate', (data) => {
     try {
-      const { targetUserName, candidate } = data;
-      
-      let targetSocketId = null;
-      users.forEach((user, socketId) => {
-        if (user.userName === targetUserName && user.roomCode === currentRoomCode) {
-          targetSocketId = socketId;
-        }
-      });
+      const { targetSocketId, candidate } = data;
       
       if (targetSocketId) {
         io.to(targetSocketId).emit('webrtc-ice-candidate', {
           candidate,
-          senderName: currentUser?.userName
+          senderSocketId: socket.id
         });
       }
     } catch (error) {
-      console.error('❌ ICE error:', error);
+      console.error('❌ WebRTC ICE candidate error:', error);
     }
   });
 
+  // ✅ ÇAĞRIYI REDDETME
   socket.on('reject-call', (data) => {
     try {
-      const { targetUserName } = data;
+      const { callerSocketId } = data;
+      const callData = activeCalls.get(socket.id);
       
-      let callerSocketId = null;
-      users.forEach((user, socketId) => {
-        if (user.userName === targetUserName && user.roomCode === currentRoomCode) {
-          callerSocketId = socketId;
-        }
-      });
-      
-      if (callerSocketId) {
-        io.to(callerSocketId).emit('call-rejected', { rejectedBy: currentUser?.userName });
-        pendingOffers.delete(socket.id);
+      if (callData) {
+        // Arayana reddedildi bildirimi gönder
+        io.to(callerSocketId).emit('call-rejected', { 
+          rejectedBy: currentUser?.userName 
+        });
+        
+        // Çağrıyı temizle
+        activeCalls.delete(callData.callerSocketId);
+        activeCalls.delete(callData.targetSocketId);
+        
+        // Kullanıcı listesini güncelle
+        updateUserList(currentRoomCode);
+        
+        console.log(`❌ Arama reddedildi: ${callData.callerName} -> ${callData.targetUserName}`);
       }
     } catch (error) {
-      console.error('❌ Reject error:', error);
+      console.error('❌ Reject call error:', error);
     }
   });
 
+  // ✅ ÇAĞRIYI SONLANDIRMA
   socket.on('end-call', (data) => {
+    try {
+      const { targetSocketId } = data;
+      const callData = activeCalls.get(socket.id);
+      
+      if (callData) {
+        // Karşı tarafa çağrının sonlandığını bildir
+        const otherPartyId = callData.callerSocketId === socket.id ? callData.targetSocketId : callData.callerSocketId;
+        
+        if (otherPartyId) {
+          io.to(otherPartyId).emit('call-ended', { 
+            endedBy: currentUser?.userName 
+          });
+        }
+        
+        // Çağrıyı temizle
+        activeCalls.delete(callData.callerSocketId);
+        activeCalls.delete(callData.targetSocketId);
+        
+        // Kullanıcı listesini güncelle
+        updateUserList(currentRoomCode);
+        
+        console.log(`📞 Arama sonlandırıldı: ${callData.callerName} <-> ${callData.targetUserName}`);
+      } else if (targetSocketId) {
+        // Doğrudan hedef socket ID ile sonlandırma
+        io.to(targetSocketId).emit('call-ended', { 
+          endedBy: currentUser?.userName 
+        });
+        
+        activeCalls.delete(socket.id);
+        activeCalls.delete(targetSocketId);
+        
+        updateUserList(currentRoomCode);
+      }
+    } catch (error) {
+      console.error('❌ End call error:', error);
+    }
+  });
+
+  // ✅ ÇAĞRI DURUMU SORGULAMA
+  socket.on('check-call-status', (data) => {
     try {
       const { targetUserName } = data;
       
       let targetSocketId = null;
+      let isInCall = false;
+      
       users.forEach((user, socketId) => {
         if (user.userName === targetUserName && user.roomCode === currentRoomCode) {
           targetSocketId = socketId;
+          isInCall = activeCalls.has(socketId);
         }
       });
       
-      if (targetSocketId) {
-        io.to(targetSocketId).emit('call-ended', { endedBy: currentUser?.userName });
-        pendingOffers.delete(targetSocketId);
-      }
+      socket.emit('call-status-response', {
+        targetUserName,
+        isAvailable: targetSocketId && !isInCall,
+        isInCall: isInCall
+      });
     } catch (error) {
-      console.error('❌ End call error:', error);
+      console.error('❌ Check call status error:', error);
     }
   });
 
@@ -544,6 +635,21 @@ io.on('connection', (socket) => {
     
     clearInterval(pingInterval);
     connectionMonitor.delete(socket.id);
+    
+    // Aktif çağrıları temizle
+    const callData = activeCalls.get(socket.id);
+    if (callData) {
+      const otherPartyId = callData.callerSocketId === socket.id ? callData.targetSocketId : callData.callerSocketId;
+      
+      if (otherPartyId) {
+        io.to(otherPartyId).emit('call-ended', { 
+          endedBy: 'Sistem (bağlantı kesildi)',
+          reason: 'connection_lost'
+        });
+        activeCalls.delete(otherPartyId);
+      }
+      activeCalls.delete(socket.id);
+    }
     
     if (currentUser && currentRoomCode) {
       const room = rooms.get(currentRoomCode);
@@ -586,6 +692,7 @@ startRenderSelfPing(); // RENDER SELF-PING
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
   console.log(`❤️ RENDER OPTIMIZED - 1DK UYUMA SORUNU ÇÖZÜLDÜ`);
+  console.log(`📞 GÖRÜNTÜLÜ ARAMA SİSTEMİ AKTİF`);
   console.log(`🔄 SELF-PING ACTIVE: ${selfPingUrl || 'localhost'}`);
   console.log(`📊 Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
 });
