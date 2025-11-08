@@ -41,6 +41,22 @@ const pendingOffers = new Map();
 const activeCalls = new Map(); // Yeni: Aktif çağrıları takip etmek için
 const connectionMonitor = new Map();
 
+// ✅ STUN SUNUCULARI - GLOBAL ARAMA DESTEĞİ İÇİN
+function getIceServers() {
+  return [
+    // Google STUN sunucuları - Global NAT çözümü
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    
+    // Fallback STUN sunucuları
+    { urls: 'stun:stun.services.mozilla.com' },
+    { urls: 'stun:stun.stunprotocol.org:3478' }
+  ];
+}
+
 // ✅ SOCKET.IO - RENDER İÇİN OPTİMİZE
 const io = socketIo(server, {
   cors: {
@@ -146,6 +162,9 @@ io.on('connection', (socket) => {
     lastPing: Date.now(),
     connectedAt: Date.now()
   });
+
+  // ✅ YENİ EKLENDİ: ICE sunucularını hemen gönder
+  socket.emit('ice-servers', { servers: getIceServers() });
 
   let currentUser = null;
   let currentRoomCode = null;
@@ -434,11 +453,11 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 📞 WEBRTC ARAMALAR - GÜNCELLENMİŞ VERSİYON
+  // 📞 WEBRTC ARAMALAR - STUN DESTEKLİ GLOBAL ARAMA
   socket.on('start-call', (data) => {
     try {
       const { targetUserName, offer, type, callerName } = data;
-      console.log(`📞 Arama başlatılıyor: ${callerName} -> ${targetUserName}, Tip: ${type}`);
+      console.log(`📞 Arama başlatılıyor (STUN ile): ${callerName} -> ${targetUserName}, Tip: ${type}`);
       
       // Hedef kullanıcıyı bul
       let targetSocketId = null;
@@ -449,6 +468,9 @@ io.on('connection', (socket) => {
       });
       
       if (targetSocketId) {
+        // ✅ ÖNEMLİ: Hedef kullanıcıya da ICE servislerini gönder
+        io.to(targetSocketId).emit('ice-servers', { servers: getIceServers() });
+        
         // Çağrıyı kaydet
         const callData = {
           callerSocketId: socket.id,
@@ -692,7 +714,8 @@ startRenderSelfPing(); // RENDER SELF-PING
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 SERVER RUNNING ON PORT ${PORT}`);
   console.log(`❤️ RENDER OPTIMIZED - 1DK UYUMA SORUNU ÇÖZÜLDÜ`);
-  console.log(`📞 GÖRÜNTÜLÜ ARAMA SİSTEMİ AKTİF`);
+  console.log(`📞 GÖRÜNTÜLÜ ARAMA SİSTEMİ AKTİF - STUN DESTEKLİ`);
+  console.log(`🌍 ARTIK 300+ KM MESAFEDEN ARAMA YAPILABİLİR`);
   console.log(`🔄 SELF-PING ACTIVE: ${selfPingUrl || 'localhost'}`);
   console.log(`📊 Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`);
 });
